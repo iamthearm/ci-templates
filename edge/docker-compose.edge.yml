@@ -1,0 +1,30 @@
+# The shared reverse proxy for every app on this VPS. Brought up ONCE, rarely touched again.
+# Reference copy — the live copy lives at /opt/edge/docker-compose.yml on the VPS itself.
+#
+# Per-app compose files (rendered by the ci-templates 'deploy' action) join the external `edge`
+# network and register their own routes via Docker labels — nothing here needs to change when a
+# new app is onboarded.
+services:
+  caddy:
+    image: lucaslorentz/caddy-docker-proxy:2.9-alpine
+    ports:
+      - "80:80"       # free on this VPS; used for the ACME HTTP-01 challenge + http->https redirect
+      - "8443:8443"   # 443 is already used by another service on this VPS (see Caddyfile.base)
+    environment:
+      - CADDY_INGRESS_NETWORKS=edge
+      - CADDY_DOCKER_CADDYFILE_PATH=/caddyfile-base/Caddyfile
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./Caddyfile.base:/caddyfile-base/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [edge]
+    restart: unless-stopped
+
+networks:
+  edge:
+    external: true   # created once: `docker network create edge`
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,8 @@
+{
+  "name": "ci-templates-prepare",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "js-yaml": "4.1.0"
+  }
+}

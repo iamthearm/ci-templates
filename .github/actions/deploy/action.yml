@@ -1,0 +1,89 @@
+name: 'Deploy to VPS'
+description: >
+  Renders the per-app docker-compose file from the validated config, ships it plus the remote
+  deploy script to the VPS over SSH, and runs the health-check/rollback logic there.
+
+inputs:
+  config:
+    description: 'Validated deploy config as a JSON string (output of the prepare action).'
+    required: true
+  image_ref:
+    description: 'Fully-qualified image ref to deploy, e.g. ghcr.io/owner/app:sha.'
+    required: true
+  vps_host:
+    description: 'VPS hostname (also used as the Caddy routing host — must be the hostname the VPS resolves to, e.g. srv1056273.hstgr.cloud).'
+    required: true
+  vps_user:
+    required: true
+  vps_ssh_key:
+    required: true
+  vps_host_key:
+    description: 'Pinned SSH host key(s) for vps_host, in known_hosts format. Captured once manually via ssh-keyscan, never scanned live in CI.'
+    required: true
+  vps_https_port:
+    description: 'Port the shared Caddy edge stack serves HTTPS on (443 is reserved for other services on this VPS).'
+    required: false
+    default: '8443'
+
+runs:
+  using: composite
+  steps:
+    - name: Render compose file
+      shell: bash
+      env:
+        CONFIG_JSON: ${{ inputs.config }}
+        IMAGE_REF: ${{ inputs.image_ref }}
+        VPS_HOST: ${{ inputs.vps_host }}
+        OUT_DIR: ${{ github.workspace }}/.deploy-rendered
+      run: node "${{ github.action_path }}/render-compose.mjs"
+
+    - name: Set up pinned SSH access
+      shell: bash
+      env:
+        VPS_SSH_KEY: ${{ inputs.vps_ssh_key }}
+        VPS_HOST_KEY: ${{ inputs.vps_host_key }}
+      run: |
+        mkdir -p ~/.ssh
+        chmod 700 ~/.ssh
+        printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
+        chmod 600 ~/.ssh/deploy_key
+        printf '%s\n' "$VPS_HOST_KEY" > ~/.ssh/known_hosts
+        chmod 600 ~/.ssh/known_hosts
+
+    - name: Ship files and run remote deploy
+      shell: bash
+      env:
+        CONFIG_JSON: ${{ inputs.config }}
+        VPS_HOST: ${{ inputs.vps_host }}
+        VPS_USER: ${{ inputs.vps_user }}
+        VPS_HTTPS_PORT: ${{ inputs.vps_https_port }}
+        RENDERED_DIR: ${{ github.workspace }}/.deploy-rendered
+        ACTION_DIR: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+
+        VPS_DIR=$(echo "$CONFIG_JSON" | jq -r '.deploy.vps_dir')
+        PATH_PREFIX=$(echo "$CONFIG_JSON" | jq -r '.deploy.path_prefix')
+        HEALTH_PATH=$(echo "$CONFIG_JSON" | jq -r '.deploy.health_check.path')
+        EXPECTED_STATUS=$(echo "$CONFIG_JSON" | jq -r '.deploy.health_check.expected_status')
+        RETRIES=$(echo "$CONFIG_JSON" | jq -r '.deploy.health_check.retries')
+        INTERVAL=$(echo "$CONFIG_JSON" | jq -r '.deploy.health_check.retry_interval_seconds')
+        TIMEOUT=$(echo "$CONFIG_JSON" | jq -r '.deploy.health_check.timeout_seconds')
+        HEALTH_URL="https://${VPS_HOST}:${VPS_HTTPS_PORT}${PATH_PREFIX}${HEALTH_PATH}"
+
+        SSH_OPTS=(-i ~/.ssh/deploy_key -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes)
+
+        echo "Deploying to ${VPS_USER}@${VPS_HOST}:${VPS_DIR}"
+        echo "Public health check URL: ${HEALTH_URL}"
+
+        ssh "${SSH_OPTS[@]}" "${VPS_USER}@${VPS_HOST}" "mkdir -p '${VPS_DIR}'"
+
+        scp "${SSH_OPTS[@]}" \
+          "${RENDERED_DIR}/docker-compose.yml.new" \
+          "${RENDERED_DIR}/required-env.txt" \
+          "${ACTION_DIR}/deploy.sh" \
+          "${ACTION_DIR}/lib.sh" \
+          "${VPS_USER}@${VPS_HOST}:${VPS_DIR}/"
+
+        ssh "${SSH_OPTS[@]}" "${VPS_USER}@${VPS_HOST}" \
+          "cd '${VPS_DIR}' && chmod +x deploy.sh lib.sh && bash deploy.sh '${HEALTH_URL}' '${RETRIES}' '${INTERVAL}' '${TIMEOUT}' '${EXPECTED_STATUS}'"

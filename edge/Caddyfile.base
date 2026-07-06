@@ -1,0 +1,6 @@
+{
+	# 443 is already in use on this VPS by another service (Pi-hole's admin UI), so the shared
+	# edge proxy serves HTTPS on 8443 instead. Port 80 stays default — it's free, and Caddy needs
+	# it for the ACME HTTP-01 challenge that issues/renews the TLS cert for the VPS hostname.
+	https_port 8443
+}

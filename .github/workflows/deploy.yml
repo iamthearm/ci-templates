@@ -1,0 +1,178 @@
+name: Reusable Deploy Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      config_path:
+        type: string
+        default: .github/deploy.config.yml
+    secrets:
+      VPS_HOST:
+        required: true
+      VPS_USER:
+        required: true
+      VPS_SSH_KEY:
+        required: true
+      VPS_HOST_KEY:
+        required: true
+      UNITY_LICENSE:
+        required: false
+
+concurrency:
+  group: deploy-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # Defense in depth: even if a caller repo's own `on:` trigger is misconfigured (e.g. includes
+  # pull_request), refuse to run anything beyond this point unless we're on a push to main.
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse to run outside push-to-main
+        if: github.event_name != 'push' || github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::This pipeline only runs on push to main. Refusing to run for event='${{ github.event_name }}' ref='${{ github.ref }}'."
+          exit 1
+
+  prepare:
+    needs: guard
+    runs-on: ubuntu-latest
+    outputs:
+      config: ${{ steps.prepare.outputs.config }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: prepare
+        uses: iamthearm/ci-templates/.github/actions/prepare@v1
+        with:
+          config_path: ${{ inputs.config_path }}
+
+  test:
+    needs: prepare
+    if: needs.prepare.result == 'success' && fromJson(needs.prepare.outputs.config).test.enabled
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run tests
+        env:
+          CFG: ${{ needs.prepare.outputs.config }}
+        run: |
+          set -euo pipefail
+          COMMAND=$(echo "$CFG" | jq -r '.test.command')
+          IMAGE=$(echo "$CFG" | jq -r '.test.image')
+          WORKDIR=$(echo "$CFG" | jq -r '.test.working_directory')
+          if [[ "$IMAGE" != "null" ]]; then
+            docker run --rm -v "$PWD":/workspace -w "/workspace/${WORKDIR}" "$IMAGE" sh -c "$COMMAND"
+          else
+            (cd "$WORKDIR" && bash -c "$COMMAND")
+          fi
+
+  # Skipped (not falsely-green) whenever unity.enabled is false, which is the default — nobody
+  # should mistake "not configured" for "passed" on a repo without a Unity CI license set up yet.
+  unity-test:
+    needs: prepare
+    if: needs.prepare.result == 'success' && fromJson(needs.prepare.outputs.config).unity.enabled == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: game-ci/unity-test-runner@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+        with:
+          unityVersion: ${{ fromJson(needs.prepare.outputs.config).unity.version }}
+          testMode: ${{ fromJson(needs.prepare.outputs.config).unity.test_mode }}
+
+  build-and-push:
+    needs: [prepare, test, unity-test]
+    if: |
+      always() &&
+      needs.prepare.result == 'success' &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped') &&
+      (needs.unity-test.result == 'success' || needs.unity-test.result == 'skipped')
+    runs-on: ubuntu-latest
+    outputs:
+      image_ref: ${{ steps.tags.outputs.sha_ref }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: tags
+        env:
+          CFG: ${{ needs.prepare.outputs.config }}
+        run: |
+          set -euo pipefail
+          APP_NAME=$(echo "$CFG" | jq -r '.app_name')
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          SHA_TAG="ghcr.io/${OWNER}/${APP_NAME}:${{ github.sha }}"
+          BRANCH_TAG="ghcr.io/${OWNER}/${APP_NAME}:$(echo '${{ github.ref_name }}' | tr '/' '-')"
+          echo "sha_ref=${SHA_TAG}" >> "$GITHUB_OUTPUT"
+          echo "branch_ref=${BRANCH_TAG}" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ fromJson(needs.prepare.outputs.config).build.context }}
+          file: ${{ fromJson(needs.prepare.outputs.config).build.dockerfile }}
+          push: true
+          tags: |
+            ${{ steps.tags.outputs.sha_ref }}
+            ${{ steps.tags.outputs.branch_ref }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Boots the just-built image locally on the runner and hits its health endpoint before the VPS
+  # is ever touched. Catches "crashes on boot / wrong port / wrong health path" cheaply — this is
+  # the cheapest mitigation for the one scenario that can't be rolled back: an app's first deploy,
+  # when there's no previous state on the VPS to revert to.
+  smoke-test:
+    needs: [prepare, build-and-push]
+    if: needs.build-and-push.result == 'success' && fromJson(needs.prepare.outputs.config).deploy.enabled
+    runs-on: ubuntu-latest
+    steps:
+      - name: Boot image and check health locally
+        env:
+          CFG: ${{ needs.prepare.outputs.config }}
+          IMAGE_REF: ${{ needs.build-and-push.outputs.image_ref }}
+        run: |
+          set -euo pipefail
+          PORT=$(echo "$CFG" | jq -r '.deploy.port')
+          HEALTH_PATH=$(echo "$CFG" | jq -r '.deploy.health_check.path')
+          EXPECTED_STATUS=$(echo "$CFG" | jq -r '.deploy.health_check.expected_status')
+          RETRIES=$(echo "$CFG" | jq -r '.deploy.health_check.retries')
+          INTERVAL=$(echo "$CFG" | jq -r '.deploy.health_check.retry_interval_seconds')
+
+          CID=$(docker run -d -p "${PORT}:${PORT}" -e "PORT=${PORT}" "$IMAGE_REF")
+          trap 'docker logs "$CID" || true; docker rm -f "$CID" >/dev/null 2>&1 || true' EXIT
+
+          for ((i = 1; i <= RETRIES; i++)); do
+            STATUS=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:${PORT}${HEALTH_PATH}" || echo 000)
+            if [[ "$STATUS" == "$EXPECTED_STATUS" ]]; then
+              echo "Smoke test passed (status ${STATUS}) on attempt ${i}/${RETRIES}"
+              exit 0
+            fi
+            echo "Attempt ${i}/${RETRIES} got status ${STATUS}, retrying in ${INTERVAL}s"
+            sleep "${INTERVAL}"
+          done
+          echo "::error::Smoke test failed: image never became healthy locally"
+          exit 1
+
+  deploy:
+    needs: [prepare, build-and-push, smoke-test]
+    if: needs.smoke-test.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: iamthearm/ci-templates/.github/actions/deploy@v1
+        with:
+          config: ${{ needs.prepare.outputs.config }}
+          image_ref: ${{ needs.build-and-push.outputs.image_ref }}
+          vps_host: ${{ secrets.VPS_HOST }}
+          vps_user: ${{ secrets.VPS_USER }}
+          vps_ssh_key: ${{ secrets.VPS_SSH_KEY }}
+          vps_host_key: ${{ secrets.VPS_HOST_KEY }}

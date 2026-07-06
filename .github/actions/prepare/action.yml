@@ -1,0 +1,26 @@
+name: 'Prepare & validate deploy config'
+description: 'Parses and validates deploy.config.yml and exposes it as a single JSON output for downstream jobs.'
+
+inputs:
+  config_path:
+    description: 'Path to deploy.config.yml, relative to the calling repo root.'
+    required: true
+    default: '.github/deploy.config.yml'
+
+outputs:
+  config:
+    description: 'The validated, defaults-applied config as a JSON string.'
+    value: ${{ steps.validate.outputs.config }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install validator dependencies
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: npm install --omit=dev --no-audit --no-fund
+
+    - name: Validate config
+      id: validate
+      shell: bash
+      run: node "${{ github.action_path }}/validate-config.mjs" "${{ github.workspace }}/${{ inputs.config_path }}"

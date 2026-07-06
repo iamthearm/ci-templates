@@ -1,0 +1,32 @@
+# Example config for a generic Node/Python/whatever HTTP service.
+# This is the same shape used by example-node-app/.github/deploy.config.yml in this workspace —
+# copy it there for the real, runnable version.
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/iamthearm/ci-templates/main/schema/deploy.config.schema.json
+version: 1
+app_name: my-node-service
+
+build:
+  dockerfile: Dockerfile
+  context: .
+
+test:
+  enabled: true
+  command: "npm test"
+  image: "node:20-alpine"   # tests run inside this image; the GitHub-hosted runner needs nothing preinstalled
+
+deploy:
+  enabled: true
+  port: 3000
+  path_prefix: "/my-node-service"     # reached at https://<vps-host>:8443/my-node-service/...
+  health_check:
+    path: "/health"
+    expected_status: 200
+    retries: 10
+    retry_interval_seconds: 3
+  env:
+    required:
+      - PORT
+      - NODE_ENV
+    optional:
+      - DATABASE_URL

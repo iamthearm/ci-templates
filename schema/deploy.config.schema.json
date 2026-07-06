@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/iamthearm/ci-templates/main/schema/deploy.config.schema.json",
+  "title": "deploy.config.yml",
+  "description": "Per-repo configuration for the iamthearm/ci-templates reusable deploy pipeline. This file documents the schema for editor tooling (e.g. yaml-language-server); validate-config.mjs performs the authoritative validation with human-readable errors at CI time.",
+  "type": "object",
+  "required": ["version", "app_name", "build", "test", "deploy"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Config schema version. Lets ci-templates evolve without breaking old configs."
+    },
+    "app_name": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]+$",
+      "description": "Used as the image name, the VPS directory name, and the default Caddy path prefix."
+    },
+    "build": {
+      "type": "object",
+      "required": ["dockerfile"],
+      "properties": {
+        "dockerfile": { "type": "string", "description": "Path to the Dockerfile, relative to repo root." },
+        "context": { "type": "string", "default": "." },
+        "args": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "default": {}
+        }
+      }
+    },
+    "test": {
+      "type": "object",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "No implicit default — must be an explicit choice so a repo can't silently end up with zero test coverage."
+        },
+        "command": { "type": "string", "description": "Required when enabled is true." },
+        "image": {
+          "type": ["string", "null"],
+          "default": null,
+          "description": "If set, command runs inside `docker run --rm <image> sh -c \"<command>\"` with the repo mounted, instead of running directly on the runner."
+        },
+        "working_directory": { "type": "string", "default": "." }
+      }
+    },
+    "unity": {
+      "type": "object",
+      "description": "Optional. Entirely irrelevant for non-Unity repos.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Must be explicitly true to run the Unity batch-mode test stage. Off by default — GitHub-hosted runners have no Unity Editor and Unity requires a CI license."
+        },
+        "version": { "type": "string", "description": "Required when enabled is true, e.g. '2022.3.10f1'." },
+        "license_secret_name": {
+          "type": "string",
+          "description": "NAME of a GitHub secret holding the Unity license (ULF), not the value. Required when enabled is true."
+        },
+        "test_mode": {
+          "type": "string",
+          "enum": ["editmode", "playmode", "both"],
+          "default": "editmode"
+        }
+      }
+    },
+    "deploy": {
+      "type": "object",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "false = test-only, nothing touches the VPS (e.g. a repo with no long-running HTTP service)."
+        },
+        "port": { "type": "integer", "description": "Container's internal listening port. Required when enabled is true. Never published directly to the host." },
+        "service_name": { "type": "string", "default": "app" },
+        "path_prefix": {
+          "type": "string",
+          "pattern": "^/.*",
+          "description": "Caddy path prefix, must be unique VPS-wide. Defaults to '/<app_name>'."
+        },
+        "vps_dir": {
+          "type": "string",
+          "description": "Defaults to '/opt/apps/<app_name>'."
+        },
+        "health_check": {
+          "type": "object",
+          "required": ["path"],
+          "properties": {
+            "path": { "type": "string", "description": "Checked as <path_prefix><path> through Caddy. Required when deploy.enabled is true." },
+            "expected_status": { "type": "integer", "default": 200 },
+            "timeout_seconds": { "type": "integer", "default": 5 },
+            "retries": { "type": "integer", "default": 10 },
+            "retry_interval_seconds": { "type": "integer", "default": 3 }
+          }
+        },
+        "env": {
+          "type": "object",
+          "description": "Names only, never values. Actual values live in the VPS's per-app .env file, created once at onboarding.",
+          "properties": {
+            "required": { "type": "array", "items": { "type": "string" }, "default": [] },
+            "optional": { "type": "array", "items": { "type": "string" }, "default": [] }
+          }
+        }
+      }
+    }
+  }
+}

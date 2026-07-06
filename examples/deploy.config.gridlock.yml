@@ -1,0 +1,31 @@
+# Example config for iamthearm/Gridlock (Unity3D). This is the *default*, safe-out-of-the-box
+# shape: no Unity Editor license required, nothing deployed to the VPS. It exists to prove the
+# config file — not the pipeline code — is what varies behavior between a Unity repo and a plain
+# HTTP service (compare against deploy.config.node.yml).
+#
+# GitHub-hosted runners don't have Unity Editor installed, and Unity requires a CI license to run
+# in batch mode. Until that license is set up, `unity.enabled: false` keeps the test stage to a
+# lightweight validation step instead of a real Unity build/test pass.
+#
+# `deploy.enabled: false` because a Unity game project isn't a long-running HTTP service this
+# pipeline knows how to health-check yet. Flip this on (and add a `deploy:` block shaped like
+# deploy.config.node.yml) if/when Gridlock grows an actual server component — that's a separate
+# design conversation, since a dedicated game server likely isn't HTTP-health-checkable the same way.
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/iamthearm/ci-templates/main/schema/deploy.config.schema.json
+version: 1
+app_name: gridlock
+
+build:
+  dockerfile: Dockerfile   # a lightweight validation container, NOT a Unity Editor build
+
+test:
+  enabled: true
+  image: "mcr.microsoft.com/dotnet/sdk:8.0"
+  command: "dotnet format --verify-no-changes"   # placeholder lint/format check, not a Unity build
+
+unity:
+  enabled: false   # flip to true (and set version + license_secret_name) once a Unity CI license exists
+
+deploy:
+  enabled: false
