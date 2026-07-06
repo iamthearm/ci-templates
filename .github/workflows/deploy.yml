@@ -127,33 +127,29 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # TEMPORARY debug job — remove once smoke-test skip issue is diagnosed.
-  debug:
-    needs: [prepare, build-and-push]
-    runs-on: ubuntu-latest
-    if: always()
-    steps:
-      - name: Dump values
-        env:
-          CFG: ${{ needs.prepare.outputs.config }}
-        run: |
-          echo "prepare.result=${{ needs.prepare.result }}"
-          echo "build-and-push.result=${{ needs.build-and-push.result }}"
-          echo "raw config length=${#CFG}"
-          echo "deploy.enabled via jq=$(echo "$CFG" | jq -r '.deploy.enabled')"
-          echo "expr A (build-and-push success check)=${{ needs.build-and-push.result == 'success' }}"
-          echo "expr B (fromJson deploy.enabled)=${{ fromJson(needs.prepare.outputs.config).deploy.enabled }}"
-          echo "expr A && B=${{ needs.build-and-push.result == 'success' && fromJson(needs.prepare.outputs.config).deploy.enabled }}"
-
   # Boots the just-built image locally on the runner and hits its health endpoint before the VPS
   # is ever touched. Catches "crashes on boot / wrong port / wrong health path" cheaply — this is
   # the cheapest mitigation for the one scenario that can't be rolled back: an app's first deploy,
   # when there's no previous state on the VPS to revert to.
   smoke-test:
     needs: [prepare, build-and-push]
-    if: always() && true
+    # Needs an explicit always(): GitHub Actions propagates a skipped status transitively through
+    # the whole ancestor graph, not just direct `needs`. unity-test sits upstream of build-and-push
+    # (which already opts out with always()), so without this, smoke-test silently inherits
+    # unity-test's skip and never runs — even though its own direct needs both succeeded.
+    if: |
+      always() &&
+      needs.build-and-push.result == 'success' &&
+      fromJson(needs.prepare.outputs.config).deploy.enabled
     runs-on: ubuntu-latest
     steps:
+      # The image is private on GHCR. This job runs on a fresh runner, separate from
+      # build-and-push's own login — without this, `docker run` below fails with "unauthorized".
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Boot image and check health locally
         env:
           CFG: ${{ needs.prepare.outputs.config }}
@@ -183,7 +179,8 @@ jobs:
 
   deploy:
     needs: [prepare, build-and-push, smoke-test]
-    if: needs.smoke-test.result == 'success'
+    # See the comment on smoke-test's `if:` — same transitive-skip-propagation reasoning applies.
+    if: always() && needs.smoke-test.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: iamthearm/ci-templates/.github/actions/deploy@v1
