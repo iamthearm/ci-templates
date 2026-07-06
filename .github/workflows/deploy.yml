@@ -127,6 +127,24 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # TEMPORARY debug job — remove once smoke-test skip issue is diagnosed.
+  debug:
+    needs: [prepare, build-and-push]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Dump values
+        env:
+          CFG: ${{ needs.prepare.outputs.config }}
+        run: |
+          echo "prepare.result=${{ needs.prepare.result }}"
+          echo "build-and-push.result=${{ needs.build-and-push.result }}"
+          echo "raw config length=${#CFG}"
+          echo "deploy.enabled via jq=$(echo "$CFG" | jq -r '.deploy.enabled')"
+          echo "expr A (build-and-push success check)=${{ needs.build-and-push.result == 'success' }}"
+          echo "expr B (fromJson deploy.enabled)=${{ fromJson(needs.prepare.outputs.config).deploy.enabled }}"
+          echo "expr A && B=${{ needs.build-and-push.result == 'success' && fromJson(needs.prepare.outputs.config).deploy.enabled }}"
+
   # Boots the just-built image locally on the runner and hits its health endpoint before the VPS
   # is ever touched. Catches "crashes on boot / wrong port / wrong health path" cheaply — this is
   # the cheapest mitigation for the one scenario that can't be rolled back: an app's first deploy,
