@@ -151,7 +151,7 @@ jobs:
   # when there's no previous state on the VPS to revert to.
   smoke-test:
     needs: [prepare, build-and-push]
-    if: true
+    if: always() && true
     runs-on: ubuntu-latest
     steps:
       - name: Boot image and check health locally
